@@ -1,0 +1,10 @@
+default[:sendhub][:appName] = 'app_name'
+default[:sendhub][:base] = 'build'
+default[:sendhub][:deployInstanceId] = 'None'
+default[:sendhub][:deployServer] = 'None'
+default[:sendhub][:sshIdentityDestIp] = 'None'
+default[:sendhub][:sshIdentity] = 'None'
+default[:sendhub][:sshKeyDeployTimeout] = 120
+default[:sendhub][:sshUser] = 'ubuntu'
+default[:sendhub][:stackId] = 'None'
+default[:sendhub][:systemUser] = 'ubuntu'

@@ -1,0 +1,26 @@
+<% servers = '' -%>
+<% count = 0 -%>
+<% node[:sendhub][:apps]["siplog-upload"][:logstashServers].each do |host| -%>
+    <% if count > 0 -%>
+        <% servers += "," -%>
+    <% end -%>
+    <% servers += " \"#{host}\"" -%>
+    <% count += 1 -%>
+<% end -%>
+
+{
+  "network": {
+    "servers": [ <%= servers %> ],
+    "timeout": 15,
+    "ssl ca": "/etc/ssl/certs/logstash-forwarder-prod.crt"
+  },
+  "files": [
+    {
+      "paths": [
+        "/uploads/siplogs/*.log"
+      ],
+      "fields": { "type": "mobile-client" },
+      "dead time": "1m"
+    }
+  ]
+}

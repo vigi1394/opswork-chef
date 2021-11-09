@@ -1,0 +1,130 @@
+#  /etc/rsyslog.conf	Configuration file for rsyslog.
+#
+#			For more information see
+#			/usr/share/doc/rsyslog-doc/html/rsyslog_conf.html
+#
+#  Default logging rules can be found in /etc/rsyslog.d/50-default.conf
+
+#################
+#### MODULES ####
+#################
+
+$ModLoad imuxsock # provides support for local system logging
+$ModLoad imklog   # provides kernel logging support (previously done by rklogd)
+#$ModLoad immark  # provides --MARK-- message capability
+
+# provides UDP syslog reception
+#$ModLoad imudp
+#$UDPServerRun 514
+
+## log every host in its own directory
+##$template RemoteHost,"/var/log/hosts/%HOSTNAME%/%$YEAR%/%$MONTH%/%$DAY%/syslog.log"
+#$template RemoteHost,"/var/log/hosts/%fromhost-ip%.log"
+#$template 20-herokuforwarder,"/var/log/hosts/heroku.log"
+#$RuleSet remote
+#*.* ?RemoteHost
+
+
+# provides TCP syslog reception
+$ModLoad imtcp
+$InputTCPMaxListeners 40
+
+#####$InputTCPServerRun 51097
+#####if $fromhost-ip != '127.0.0.1' then /var/log/hosts/heroku.log
+
+#$template HerokuForward,"/var/log/hosts/heroku.log"
+#*.* ?HerokuForward
+#$RuleSet RSYSLOG_DefaultRuleset
+
+
+#$template RemoteHost,"/var/log/hosts/%fromhost-ip%.log"
+#$RuleSet remote
+#*.* ?RemoteHost
+## bind ruleset to tcp listener
+#$InputTCPServerBindRuleset remote
+#$InputTCPServerRun 51097
+#if $source != 'localhost' then /var/log/hosts/heroku.log
+
+###########################
+#### GLOBAL DIRECTIVES ####
+###########################
+
+#
+# Use traditional timestamp format.
+# To enable high precision timestamps, comment out the following line.
+#
+$ActionFileDefaultTemplate RSYSLOG_TraditionalFileFormat
+
+# Filter duplicated messages
+$RepeatedMsgReduction on
+
+#
+# Set the default permissions for all log files.
+#
+$FileOwner syslog
+$FileGroup adm
+$FileCreateMode 0640
+$DirCreateMode 0755
+$Umask 0022
+$PrivDropToUser syslog
+$PrivDropToGroup syslog
+
+#
+# Where to place spool files
+#
+$WorkDirectory /var/spool/rsyslog
+
+#
+# Include all config files in /etc/rsyslog.d/
+#
+$IncludeConfig /etc/rsyslog.d/*.conf
+
+
+##$template RemoteHost,"/var/log/hosts/%fromhost-ip%.log"
+#$template RemoteHost,"/var/log/hosts/%HOSTNAME%.log"
+#%hostname%.log"
+#$RuleSet remote
+#$template RemoteHost,"/var/log/hosts/heroku.log"
+#$RulesetCreateMainQueue on
+##*.* ?RemoteHost
+#*.* /var/log/hosts/heroku.log
+#if $fromhost-ip != '127.0.0.1' then /var/log/hosts/heroku.log
+#*.* -?RemoteHost
+# bind ruleset to tcp listener
+#$InputTCPServerBindRuleset remote
+#$InputTCPServerBindRuleset RemoteHost
+#if $fromhost-ip != '127.0.0.1' then /var/log/hosts/heroku.log
+#& ~
+#$InputTCPServerRun 51097
+##:fromhost-ip, "regex", "^[^1]\|1^[2]\|12[^7]\|127[^\.]\|127\.[^0]\|127\.0[^\.]\|127\.0\.[^1]$" "/var/log/hosts/%HOSTNAME%.log"
+##& ~
+
+$SystemLogRateLimitInterval 0
+
+$template LogglyFormat,"<%%pri%>%protocol-version% %timestamp:::date-rfc3339% %HOSTNAME% %app-name% %procid% %msgid% [2a35c0d1-3e24-43b6-bb2f-d9e0c47bd8ad@41058] %msg%"
+
+$DefaultNetstreamDriverCAFile /etc/rsyslog.d/keys/ca.d/logs-01.loggly.com_sha12.crt
+
+
+<% node[:sendhub][:apps].each_pair do |app, properties| -%>
+$RuleSet <%= app %>
+*.* /mnt/var/log/hosts/<%= app %>.log
+<% if node[:sendhub].has_key?(:forwardLogs) && node[:sendhub][:forwardLogs] -%>
+  <% if properties.has_key?(:fwdToLoggly) && properties[:fwdToLoggly] -%>
+$ActionSendStreamDriver gtls
+$ActionSendStreamDriverMode 1
+$ActionSendStreamDriverAuthMode x509/name
+$ActionSendStreamDriverPermittedPeer *.loggly.com
+$ActionQueueType LinkedList
+$ActionQueueFileName <%= app %>_forwarding
+$ActionResumeRetryCount -1
+$ActionQueueSaveOnShutdown on
+*.* @@logs-01.loggly.com:6514;LogglyFormat
+  <% end -%>
+<% end -%>
+
+$InputTCPServerBindRuleset <%= app %>
+$InputTCPServerRun <%= properties[:loggingPort] %>
+
+
+<% end -%>
