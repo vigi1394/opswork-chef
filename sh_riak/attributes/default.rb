@@ -1,0 +1,1 @@
+include_attribute 'deployment_resources::default'

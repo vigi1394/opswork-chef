@@ -1,0 +1,35 @@
+<% layer = node[:opsworks][:instance][:layers][0] -%>
+<% appName = node[:sendhub][:layers][layer][:appName] -%>
+<% staticsPath = false -%>
+<% if node[:sendhub][:layers][layer].has_key?(:staticsPath) -%>
+    <% staticsPath = node[:sendhub][:layers][layer][:staticsPath] -%>
+<% end -%>
+<% nginxServerName = "_" -%>
+<% if node[:sendhub][:apps][appName].has_key?(:nginx_server_name) -%>
+  <% nginxServerName = node[:sendhub][:apps][appName][:nginx_server_name] -%>
+<% end -%>
+
+    server {
+        listen 80 default;
+        client_max_body_size 4G;
+        server_name <%= nginxServerName -%>;
+
+        keepalive_timeout 5;
+        
+        location / {
+            #proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header Host $host;
+            proxy_redirect off;
+
+            proxy_pass   http://127.0.0.1:8000;
+        }
+        
+        <% if !staticsPath.is_a?(String) -%>
+        root /sendhub_build/<%= appName %>/src/current;
+        <% else -%>
+        location ~ ^/dist-media/(?<hash>[a-f,0-9]+) {
+            root /sendhub_build/sendhub/src/$hash/inforeach;
+        }
+        <% end -%>
+
+    }

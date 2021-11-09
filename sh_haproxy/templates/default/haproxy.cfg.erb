@@ -1,0 +1,695 @@
+global
+    maxconn 4096
+    # NB: Base HAProxy logging configuration is as per: http://kvz.io/blog/2010/08/11/haproxy-logging/
+    log 127.0.0.1 local1 info
+    log-send-hostname
+    #log <%= node[:sendhub][:loggingServer] %>:<%= node[:sendhub][:apps][:sendhub][:loggingPort] %> local1 info
+
+defaults
+    log global
+    mode http
+    option tcplog
+    retries 4
+    option redispatch
+    maxconn 32000
+    timeout connect 5000
+    timeout server 30000
+    timeout client 30000
+    #option http-server-close
+    stats auth admin:s3ndh1b2012
+    stats uri /haproxy
+    unique-id-format %{+X}o\ %ci:%cp_%fi:%fp_%ts_%rt:%pid
+    unique-id-header X-Request-ID
+
+frontend frontend
+
+    bind 0.0.0.0:80
+    # Require SSL
+    redirect scheme https if !{ ssl_fc }
+    bind 0.0.0.0:443 ssl crt /etc/haproxy/certs.d no-sslv3 ciphers EECDH+CHACHA20:EECDH+AES128:RSA+AES128:EECDH+AES256:RSA+AES256:EECDH+3DES:RSA+3DES:!MD5;
+    option httplog
+    option http-pretend-keepalive
+    option forwardfor
+    option http-server-close
+    log-format {"request_id":\ "%ID",\ "datetime":\ "%T",\ "timestamp":\ %Ts,\ "Tq":\ %Tq,\ "Tc":\ %Tc,\ "Tw":\ %Tw,\ "Tt":\ %Tt,\ "client":\ %{+Q}ci,\ "client_port":\ %cp,\ "host":\ %{+Q}si,\ "host_port":\ %sp,\ "bckend":\ %{+Q}b,\ "status":\ %ST,\ "bytes_read":\ %B,\ "bytes_out":\ %U,\ "query":\ %{+Q}r,\ "cf_connecting_ip":\ %{+Q}hrl}
+    http-response add-header X-Request-ID %ID
+
+    # NOTE: if/when we capture any additional headers, this log format
+    # field will need to change from cf_connecting_ip to request_headers
+    # as there is no way to call out individual captured request headers
+    capture request header CF-Connecting-IP len 45
+
+  <% useNginx = false -%>
+  <% if node[:sendhub].has_key?(:useNginx) && node[:sendhub][:useNginx] -%>
+    <% useNginx = true -%>
+  <% end -%>
+
+  <% backend = 'billing' -%>
+  <% if node[:sendhub][:apps][:billing].has_key?(:maintenance) && node[:sendhub][:apps][:billing][:maintenance] -%>
+    <% backend = 'maintenance' -%>
+  <% end -%>
+  <% routing = '' -%>
+  <% node[:sendhub][:apps][:billing][:hosts].each do |host| -%>
+    <% routing += " hdr(host) -i #{host} " -%>
+  <% end -%>
+    use_backend <%= backend %> if { <%= routing %> }
+
+  # Sendhub billing routing overrides
+  <% if node[:sendhub][:apps][:billing].has_key?(:reroute_sh_uri) && ! node[:sendhub][:apps][:billing][:reroute_sh_uri].empty? -%>
+    <% if node[:sendhub][:apps][:billing].has_key?(:maintenance) && node[:sendhub][:apps][:billing][:maintenance] -%>
+      <% backend = 'maintenance' -%>
+    <% end -%>
+    <% routing = '' -%>
+    <% node[:sendhub][:apps][:sendhub][:hosts].each do |host| -%>
+      <% routing += " hdr(host) -i #{host} " -%>
+    <% end -%>
+    <% uri_reroutes_from_sendhub = '' -%>
+    <% node[:sendhub][:apps][:billing][:reroute_sh_uri].each do |uri| -%>
+      <% uri_reroutes_from_sendhub += " path_beg -i #{uri} " -%>
+    <% end -%>
+    use_backend <%= backend %> if { <%= routing %> } { <%= uri_reroutes_from_sendhub %> }
+  <% end -%>
+
+
+  <% backend = 'contacts' -%>
+  <% if node[:sendhub][:apps][:contacts].has_key?(:maintenance) && node[:sendhub][:apps][:contacts][:maintenance] -%>
+      <% backend = 'maintenance' -%>
+  <% end -%>
+  <% routing = '' -%>
+  <% node[:sendhub][:apps][:contacts][:hosts].each do |host| -%>
+      <% routing += " hdr(host) -i #{host} " -%>
+  <% end -%>
+  use_backend <%= backend %> if { <%= routing %> }
+
+  # Sendhub contacts routing overrides
+  <% if node[:sendhub][:apps][:contacts].has_key?(:reroute_sh_uri) && ! node[:sendhub][:apps][:contacts][:reroute_sh_uri].empty? -%>
+      <% if node[:sendhub][:apps][:contacts].has_key?(:maintenance) && node[:sendhub][:apps][:contacts][:maintenance] -%>
+          <% backend = 'maintenance' -%>
+      <% end -%>
+      <% routing = '' -%>
+      <% node[:sendhub][:apps][:sendhub][:hosts].each do |host| -%>
+          <% routing += " hdr(host) -i #{host} " -%>
+      <% end -%>
+      <% uri_reroutes_from_sendhub = '' -%>
+      <% node[:sendhub][:apps][:contacts][:reroute_sh_uri].each do |uri| -%>
+          <% uri_reroutes_from_sendhub += " path_beg -i #{uri} " -%>
+      <% end -%>
+      use_backend <%= backend %> if { <%= routing %> } { <%= uri_reroutes_from_sendhub %> }
+  <% end -%>
+
+  
+  # Add the userapi_credentials header if the url params exist
+  acl using_username urlp(username) -m found
+  acl using_apikey urlp(api_key) -m found
+  
+  http-request set-header sendhub_userapi_credentials %[urlp(username)]_%[urlp(api_key)] if using_username using_apikey
+  
+  #############################################################################
+  # Sendhub web routing overrides
+  #
+  # NB: This Section can be removed after June 1st, 2015. At that time, all
+  #     mobile clients should be using app.sendhub.com. "www" should point 
+  #     directly to our external web hosting provider via cname dns record.
+  #############################################################################
+  <% webflow_routing = '' -%>
+  <% node[:sendhub][:apps][:sendhub][:web_hosts].each do |host| -%>
+    <% webflow_routing += " hdr(host) -i #{host} " -%>
+  <% end -%>
+    acl sendhub_webflow_hosts <%= webflow_routing %>
+
+  <% uri_reroutes_from_webflow = '' -%>
+  <% if node[:sendhub][:apps][:sendhub].has_key?(:reroute_sh_uri) && ! node[:sendhub][:apps][:sendhub][:reroute_sh_uri].empty? -%>
+    <% node[:sendhub][:apps][:sendhub][:reroute_sh_uri].each do |uri| -%>
+      <% uri_reroutes_from_webflow += " path_beg -i #{uri} " -%>
+    <% end -%>
+  <% end -%>
+    acl sendhub_app_uri <%= uri_reroutes_from_webflow %>
+    
+  <% backend = 'sendhub' -%>
+  <% if node[:sendhub][:apps][:sendhub].has_key?(:maintenance) && node[:sendhub][:apps][:sendhub][:maintenance] -%>
+    <% backend = 'maintenance' -%>
+  <% end -%>
+    use_backend <%= backend %> if sendhub_webflow_hosts sendhub_app_uri
+  
+    use_backend web if sendhub_webflow_hosts
+    
+  <% routing = '' -%>
+  <% node[:sendhub][:apps][:sendhub][:hosts].each do |host| -%>
+    <% routing += " hdr(host) -i #{host} " -%>
+  <% end -%>
+    use_backend <%= backend %> if { <%= routing %> }
+
+  #############################################################################
+  # END Sendhub web routing overrides
+  #############################################################################
+
+  <% backend = 'admin' -%>
+  <% if node[:sendhub][:apps][:admin].has_key?(:maintenance) && node[:sendhub][:apps][:admin][:maintenance] -%>
+    <% backend = 'maintenance' -%>
+  <% end -%>
+  <% routing = '' -%>
+  <% node[:sendhub][:apps][:admin][:hosts].each do |host| -%>
+    <% routing += " hdr(host) -i #{host} " -%>
+  <% end -%>
+    use_backend <%= backend %> if { <%= routing %> }
+
+  <% backend = 'entitlements' -%>
+  <% if node[:sendhub][:apps][:entitlements].has_key?(:maintenance) && node[:sendhub][:apps][:entitlements][:maintenance] -%>
+    <% backend = 'maintenance' -%>
+  <% end -%>
+  <% routing = '' -%>
+  <% node[:sendhub][:apps][:entitlements][:hosts].each do |host| -%>
+    <% routing += " hdr(host) -i #{host} " -%>
+  <% end -%>
+    use_backend <%= backend %> if  { <%= routing %>  }
+
+  <% backend = 'profile' -%>
+  <% if node[:sendhub][:apps][:profile].has_key?(:maintenance) && node[:sendhub][:apps][:profile][:maintenance] -%>
+    <% backend = 'maintenance' -%>
+  <% end -%>
+  <% routing = '' -%>
+  <% node[:sendhub][:apps][:profile][:hosts].each do |host| -%>
+    <% routing += " hdr(host) -i #{host} " -%>
+  <% end -%>
+  
+    use_backend <%= backend %> if {  <%= routing %>  }
+  
+  <% backend = 'inbound-sms' -%>
+  <% if node[:sendhub][:apps]["inbound-sms"].has_key?(:maintenance) && node[:sendhub][:apps]["inbound-sms"][:maintenance] -%>
+    <% backend = 'maintenance' -%>
+  <% end -%>
+  <% routing = '' -%>
+  <% node[:sendhub][:apps]["inbound-sms"][:hosts].each do |host| -%>
+    <% routing += " hdr(host) -i #{host} " -%>
+  <% end -%>
+
+    use_backend <%= backend %> if {  <%= routing %>  }
+
+  <% backend = 'voice' -%>
+  <% if node[:sendhub][:apps][:voice].has_key?(:maintenance) && node[:sendhub][:apps][:voice][:maintenance] -%>
+    <% backend = 'maintenance' -%>
+  <% end -%>
+  <% routing = '' -%>
+  <% node[:sendhub][:apps][:voice][:hosts].each do |host| -%>
+    <% routing += " hdr(host) -i #{host} " -%>
+  <% end -%>
+    use_backend <%= backend %> if {  <%= routing %>  }
+
+  <% backend = 'siplog-upload' -%>
+  <% if node[:sendhub][:apps]['siplog-upload'].has_key?(:maintenance) && node[:sendhub][:apps]['siplog-upload'][:maintenance] -%>
+    <% backend = 'maintenance' -%>
+  <% end -%>
+  <% routing = '' -%>
+  <% node[:sendhub][:apps]['siplog-upload'][:hosts].each do |host| -%>
+    <% routing += " hdr(host) -i #{host} " -%>
+  <% end -%>
+    use_backend <%= backend %> if {  <%= routing %>  }
+
+# Dummy Backends to throttle API request rates
+backend throttle_apikey
+    stick-table type string len 100 size 10k expire 15m store conn_cur
+	  
+backend throttle_sessioncookie
+    stick-table type string len 64 size 10k expire 15m store conn_cur	
+    	
+backend sendhub
+    balance roundrobin
+    reqadd X-Forwarded-Proto:\ https if { ssl_fc }
+    option forwardfor
+    option abortonclose
+    option httpchk GET /robots.txt
+    stats enable
+    stats uri /haproxy
+    stats auth admin:s3ndh1b2012
+    
+    # BEGIN API Throttling Logic
+    reqdel ^sendhub_userapi_credentials
+    
+    <% sessionid_name = 'sessionid' -%>
+    <% if node[:sendhub].has_key?(:sessionid_name) -%>
+      <% sessionid_name = node[:sendhub][:sessionid_name] -%>
+    <% end -%>
+    
+    # Run through ACLs
+    <% if node[:sendhub].has_key?(:throttle_uris) -%>
+      <% node[:sendhub][:throttle_uris].each do |uri| -%>
+    <%= "acl using_api path_beg -i #{uri}" %>
+      <% end -%>
+    <% end -%>
+    <% if node[:sendhub].has_key?(:api_hosts) -%>
+      <% node[:sendhub][:api_hosts].each do |host_name| -%>
+    <%= "acl using_api hdr(host) -i #{host_name}" %>
+      <% end -%>
+    <% end -%>
+    acl using_username urlp(username) -m found
+    acl using_apikey urlp(api_key) -m found
+    acl using_webapp req.cook(<%= sessionid_name %>) -m found
+    
+    stick store-request req.hdr(sendhub_userapi_credentials) table throttle_apikey if using_api using_username using_apikey
+    stick store-request req.cook(<%= sessionid_name %>) table throttle_sessioncookie if using_api using_webapp
+    
+    tcp-request content track-sc1 req.hdr(sendhub_userapi_credentials) table throttle_apikey if using_api using_username using_apikey
+    tcp-request content track-sc1 req.cook(<%= sessionid_name %>) table throttle_sessioncookie if using_api using_webapp
+    
+    # White list internal IPs
+    acl white_list src 127.0.0.1/32 10.0.0.0/8
+
+    acl too_fast sc1_conn_cur ge 100
+    
+    # reject if not white listed and too many connections for this user
+    http-request deny if !white_list too_fast
+    # END API Throttling Logic
+    
+  <% port = '8000' -%>
+  <% if useNginx -%>
+    <% port = '80' -%>
+  <% end -%>
+
+  <% servers = 0 -%>
+  <% node[:opsworks][:layers][:sendhub][:instances].each_value do |instance| -%>
+    <% servers += 1 -%>
+    server ec2-id-<%= instance[:aws_instance_id] %> <%= instance[:private_ip] %>:<%= port %> check port <%= port %> observe layer7
+  <% end -%>
+  <% if servers == 0 -%>
+    server localhost 127.0.0.1:8080 weight 1 maxconn 5 check
+  <% end -%>
+
+backend billing
+    balance roundrobin
+    reqadd X-Forwarded-Proto:\ https if { ssl_fc }
+    option forwardfor
+    option abortonclose
+    option httpchk GET /health
+    
+    # BEGIN API Throttling Logic
+    reqdel ^sendhub_userapi_credentials
+    
+    <% sessionid_name = 'sessionid' -%>
+    <% if node[:sendhub].has_key?(:sessionid_name) -%>
+      <% sessionid_name = node[:sendhub][:sessionid_name] -%>
+    <% end -%>
+    
+    # Run through ACLs
+    <% if node[:sendhub].has_key?(:throttle_uris) -%>
+      <% node[:sendhub][:throttle_uris].each do |uri| -%>
+    <%= "acl using_api path_beg -i #{uri}" %>
+      <% end -%>
+    <% end -%>
+    <% if node[:sendhub].has_key?(:api_hosts) -%>
+      <% node[:sendhub][:api_hosts].each do |host_name| -%>
+    <%= "acl using_api hdr(host) -i #{host_name}" %>
+      <% end -%>
+    <% end -%>
+    acl using_username urlp(username) -m found
+    acl using_apikey urlp(api_key) -m found
+    acl using_webapp req.cook(<%= sessionid_name %>) -m found
+    
+    stick store-request req.hdr(sendhub_userapi_credentials) table throttle_apikey if using_api using_username using_apikey
+    stick store-request req.cook(<%= sessionid_name %>) table throttle_sessioncookie if using_api using_webapp
+    
+    tcp-request content track-sc1 req.hdr(sendhub_userapi_credentials) table throttle_apikey if using_api using_username using_apikey
+    tcp-request content track-sc1 req.cook(<%= sessionid_name %>) table throttle_sessioncookie if using_api using_webapp
+    
+    # White list internal IPs
+    acl white_list src 127.0.0.1/32 10.0.0.0/8
+
+    acl too_fast sc1_conn_cur ge 100
+    
+    # reject if not white listed and too many connections for this user
+    http-request deny if !white_list too_fast
+    # END API Throttling Logic
+    
+  <% port = '8000' -%>
+  <% if useNginx -%>
+    <% port = '80' -%>
+  <% end -%>
+
+  <% servers = 0 -%>
+  <% node[:opsworks][:layers][:billing][:instances].each_value do |instance| -%>
+    <% servers += 1 -%>
+    server ec2-id-<%= instance[:aws_instance_id] %> <%= instance[:private_ip] %>:<%= port %> check port <%= port %> observe layer7
+  <% end -%>
+  <% if servers == 0 -%>
+    server localhost 127.0.0.1:8080 weight 1 maxconn 5 check
+  <% end -%>
+
+
+backend contacts
+    balance roundrobin
+    reqadd X-Forwarded-Proto:\ https if { ssl_fc }
+    option forwardfor
+    option abortonclose
+    option httpchk GET /health
+
+    # BEGIN API Throttling Logic
+    reqdel ^sendhub_userapi_credentials
+
+    <% sessionid_name = 'sessionid' -%>
+    <% if node[:sendhub].has_key?(:sessionid_name) -%>
+        <% sessionid_name = node[:sendhub][:sessionid_name] -%>
+    <% end -%>
+
+    # Run through ACLs
+    <% if node[:sendhub].has_key?(:throttle_uris) -%>
+        <% node[:sendhub][:throttle_uris].each do |uri| -%>
+            <%= "acl using_api path_beg -i #{uri}" %>
+        <% end -%>
+    <% end -%>
+    <% if node[:sendhub].has_key?(:api_hosts) -%>
+        <% node[:sendhub][:api_hosts].each do |host_name| -%>
+            <%= "acl using_api hdr(host) -i #{host_name}" %>
+        <% end -%>
+    <% end -%>
+    acl using_username urlp(username) -m found
+    acl using_apikey urlp(api_key) -m found
+    acl using_webapp req.cook(<%= sessionid_name %>) -m found
+
+    stick store-request req.hdr(sendhub_userapi_credentials) table throttle_apikey if using_api using_username using_apikey
+    stick store-request req.cook(<%= sessionid_name %>) table throttle_sessioncookie if using_api using_webapp
+
+    tcp-request content track-sc1 req.hdr(sendhub_userapi_credentials) table throttle_apikey if using_api using_username using_apikey
+    tcp-request content track-sc1 req.cook(<%= sessionid_name %>) table throttle_sessioncookie if using_api using_webapp
+
+    # White list internal IPs
+    acl white_list src 127.0.0.1/32 10.0.0.0/8
+
+    acl too_fast sc1_conn_cur ge 100
+
+    # reject if not white listed and too many connections for this user
+    http-request deny if !white_list too_fast
+    # END API Throttling Logic
+
+    <% port = '8000' -%>
+    <% if useNginx -%>
+        <% port = '80' -%>
+    <% end -%>
+
+    <% servers = 0 -%>
+    <% node[:opsworks][:layers][:contacts][:instances].each_value do |instance| -%>
+        <% servers += 1 -%>
+        server ec2-id-<%= instance[:aws_instance_id] %> <%= instance[:private_ip] %>:<%= port %> check port <%= port %> observe layer7
+    <% end -%>
+    <% if servers == 0 -%>
+        server localhost 127.0.0.1:8080 weight 1 maxconn 5 check
+    <% end -%>
+
+###############################################################################
+# Sendhub web routing backend
+#
+# NB: This Backend can be removed after June 1st, 2015. At that time, all
+#     mobile clients should be using app.sendhub.com. "www" should point 
+#     directly to our external web hosting provider via cname dns record.
+###############################################################################
+backend web
+    <% web_host_domain = 'sendhub.webflow.com' -%>
+    <% if node[:sendhub][:apps][:sendhub].has_key?(:web_host_domain) && ! node[:sendhub][:apps][:sendhub][:web_host_domain].empty? -%>
+      <% web_host_domain = node[:sendhub][:apps][:sendhub][:web_host_domain] -%>
+    <% end -%>
+    <% web_host_port = '80' -%>
+    <% if node[:sendhub][:apps][:sendhub].has_key?(:web_host_port) -%>
+      <% web_host_port = node[:sendhub][:apps][:sendhub][:web_host_port] -%>
+    <% end -%>
+    <% web_content_ttl = '60' -%>
+    <% if node[:sendhub][:apps][:sendhub].has_key?(:web_content_ttl)  -%>
+      <% web_content_ttl = node[:sendhub][:apps][:sendhub][:web_content_ttl] -%>
+    <% end -%>
+    <% web_content_sttl = '300' -%>
+    <% if node[:sendhub][:apps][:sendhub].has_key?(:web_content_sttl) -%>
+      <% web_content_sttl = node[:sendhub][:apps][:sendhub][:web_content_sttl] -%>
+    <% end -%>
+    balance roundrobin
+    option abortonclose
+    reqadd X-Forwarded-Proto:\ http
+    rspadd Cache-Control:\ no-transform,public,max-age=<%= web_content_ttl %>,s-maxage=<%= web_content_sttl %>
+    reqirep ^Host: Host:\ <%= web_host_domain %>
+
+    server web <%= web_host_domain %>:<%= web_host_port %>
+###############################################################################
+# END Sendhub web routing backend
+###############################################################################
+
+backend admin
+
+  <% port = '8000' -%>
+  <% if useNginx -%>
+    <% port = '80' -%>
+  <% end -%>
+
+    balance roundrobin
+  <% servers = 0 -%>
+  <% node[:opsworks][:layers][:admin][:instances].each_value do |instance| -%>
+    <% servers += 1 -%>
+    server ec2-id-<%= instance[:aws_instance_id] %> <%= instance[:private_ip] %>:<%= port %> weight 1 maxconn 5 check
+  <% end -%>
+  <% if servers == 0 -%>
+    server localhost 127.0.0.1:8080 weight 1 maxconn 5 check
+  <% end -%>
+
+backend entitlements
+    balance roundrobin
+    reqadd X-Forwarded-Proto:\ https if { ssl_fc }
+    option forwardfor
+    option abortonclose
+    option httpchk GET /
+    
+    # BEGIN API Throttling Logic
+    reqdel ^sendhub_userapi_credentials
+    
+    <% sessionid_name = 'sessionid' -%>
+    <% if node[:sendhub].has_key?(:sessionid_name) -%>
+      <% sessionid_name = node[:sendhub][:sessionid_name] -%>
+    <% end -%>
+    
+    # Run through ACLs
+    <% if node[:sendhub].has_key?(:throttle_uris) -%>
+      <% node[:sendhub][:throttle_uris].each do |uri| -%>
+    <%= "acl using_api path_beg -i #{uri}" %>
+      <% end -%>
+    <% end -%>
+    <% if node[:sendhub].has_key?(:api_hosts) -%>
+      <% node[:sendhub][:api_hosts].each do |host_name| -%>
+    <%= "acl using_api hdr(host) -i #{host_name}" %>
+      <% end -%>
+    <% end -%>
+    acl using_username urlp(username) -m found
+    acl using_apikey urlp(api_key) -m found
+    acl using_webapp req.cook(<%= sessionid_name %>) -m found
+    
+    stick store-request req.hdr(sendhub_userapi_credentials) table throttle_apikey if using_api using_username using_apikey
+    stick store-request req.cook(<%= sessionid_name %>) table throttle_sessioncookie if using_api using_webapp
+    
+    tcp-request content track-sc1 req.hdr(sendhub_userapi_credentials) table throttle_apikey if using_api using_username using_apikey
+    tcp-request content track-sc1 req.cook(<%= sessionid_name %>) table throttle_sessioncookie if using_api using_webapp
+    
+    # White list internal IPs
+    acl white_list src 127.0.0.1/32 10.0.0.0/8
+
+    acl too_fast sc1_conn_cur ge 100
+    
+    # reject if not white listed and too many connections for this user
+    http-request deny if !white_list too_fast
+    # END API Throttling Logic
+
+  <% port = '8000' -%>
+  <% if useNginx -%>
+    <% port = '80' -%>
+  <% end -%>
+  
+  <% servers = 0 -%>
+  <% node[:opsworks][:layers][:entitlements][:instances].each_value do |instance| -%>
+    <% servers += 1 -%>
+    server ec2-id-<%= instance[:aws_instance_id] %> <%= instance[:private_ip] %>:<%= port %> check port <%= port %> observe layer7
+  <% end -%>
+  <% if servers == 0 -%>
+    server localhost 127.0.0.1:8080 weight 1 maxconn 5 check
+  <% end -%>
+
+  
+    stats enable
+    stats uri /haproxy
+    stats auth admin:s3ndh1b2012
+    
+backend profile
+    balance roundrobin
+    reqadd X-Forwarded-Proto:\ https if { ssl_fc }
+    option forwardfor
+    option abortonclose
+    option httpchk GET /
+    
+    # BEGIN API Throttling Logic
+    reqdel ^sendhub_userapi_credentials
+    
+    <% sessionid_name = 'sessionid' -%>
+    <% if node[:sendhub].has_key?(:sessionid_name) -%>
+      <% sessionid_name = node[:sendhub][:sessionid_name] -%>
+    <% end -%>
+    
+    # Run through ACLs
+    <% if node[:sendhub].has_key?(:throttle_uris) -%>
+      <% node[:sendhub][:throttle_uris].each do |uri| -%>
+    <%= "acl using_api path_beg -i #{uri}" %>
+      <% end -%>
+    <% end -%>
+    <% if node[:sendhub].has_key?(:api_hosts) -%>
+      <% node[:sendhub][:api_hosts].each do |host_name| -%>
+    <%= "acl using_api hdr(host) -i #{host_name}" %>
+      <% end -%>
+    <% end -%>
+    acl using_username urlp(username) -m found
+    acl using_apikey urlp(api_key) -m found
+    acl using_webapp req.cook(<%= sessionid_name %>) -m found
+    
+    stick store-request req.hdr(sendhub_userapi_credentials) table throttle_apikey if using_api using_username using_apikey
+    stick store-request req.cook(<%= sessionid_name %>) table throttle_sessioncookie if using_api using_webapp
+    
+    tcp-request content track-sc1 req.hdr(sendhub_userapi_credentials) table throttle_apikey if using_api using_username using_apikey
+    tcp-request content track-sc1 req.cook(<%= sessionid_name %>) table throttle_sessioncookie if using_api using_webapp
+    
+    # White list internal IPs
+    acl white_list src 127.0.0.1/32 10.0.0.0/8
+
+    acl too_fast sc1_conn_cur ge 100
+    
+    # reject if not white listed and too many connections for this user
+    http-request deny if !white_list too_fast
+    # END API Throttling Logic
+  
+  <% port = '8000' -%>
+  <% if useNginx -%>
+    <% port = '80' -%>
+  <% end -%>
+
+  <% servers = 0 -%>
+  <% node[:opsworks][:layers]["profile"][:instances].each_value do |instance| -%>
+    <% servers += 1 -%>
+    server ec2-id-<%= instance[:aws_instance_id] %> <%= instance[:private_ip] %>:<%= port %> check port <%= port %> observe layer7
+  <% end -%>
+  <% if servers == 0 -%>
+    server localhost 127.0.0.1:8080 weight 1 maxconn 5 check
+  <% end -%>
+
+    stats enable
+    stats uri /haproxy
+    stats auth admin:s3ndh1b2012
+
+backend inbound-sms
+    balance roundrobin
+    reqadd X-Forwarded-Proto:\ https if { ssl_fc }
+    option forwardfor
+    option abortonclose
+    option httpchk GET /
+  
+  <% port = '8000' -%>
+  <% if useNginx -%>
+    <% port = '80' -%>
+  <% end -%>
+
+  <% servers = 0 -%>
+  <% node[:opsworks][:layers]["inbound-sms"][:instances].each_value do |instance| -%>
+    <% servers += 1 -%>
+    server ec2-id-<%= instance[:aws_instance_id] %> <%= instance[:private_ip] %>:<%= port %> check port <%= port %> observe layer7
+  <% end -%>
+  <% if servers == 0 -%>
+    server localhost 127.0.0.1:8080 weight 1 maxconn 5 check
+  <% end -%>
+
+    stats enable
+    stats uri /haproxy
+    stats auth admin:s3ndh1b2012
+
+backend voice
+    balance roundrobin
+    reqadd X-Forwarded-Proto:\ https if { ssl_fc }
+    option forwardfor
+    option abortonclose
+    option httpchk GET /
+    
+    # BEGIN API Throttling Logic
+    reqdel ^sendhub_userapi_credentials
+    
+    <% sessionid_name = 'sessionid' -%>
+    <% if node[:sendhub].has_key?(:sessionid_name) -%>
+      <% sessionid_name = node[:sendhub][:sessionid_name] -%>
+    <% end -%>
+    
+    # Run through ACLs
+    <% if node[:sendhub].has_key?(:throttle_uris) -%>
+      <% node[:sendhub][:throttle_uris].each do |uri| -%>
+    <%= "acl using_api path_beg -i #{uri}" %>
+      <% end -%>
+    <% end -%>
+    <% if node[:sendhub].has_key?(:api_hosts) -%>
+      <% node[:sendhub][:api_hosts].each do |host_name| -%>
+    <%= "acl using_api hdr(host) -i #{host_name}" %>
+      <% end -%>
+    <% end -%>
+    acl using_username urlp(username) -m found
+    acl using_apikey urlp(api_key) -m found
+    acl using_webapp req.cook(<%= sessionid_name %>) -m found
+    
+    stick store-request req.hdr(sendhub_userapi_credentials) table throttle_apikey if using_api using_username using_apikey
+    stick store-request req.cook(<%= sessionid_name %>) table throttle_sessioncookie if using_api using_webapp
+    
+    tcp-request content track-sc1 req.hdr(sendhub_userapi_credentials) table throttle_apikey if using_api using_username using_apikey
+    tcp-request content track-sc1 req.cook(<%= sessionid_name %>) table throttle_sessioncookie if using_api using_webapp
+    
+    # White list internal IPs
+    acl white_list src 127.0.0.1/32 10.0.0.0/8
+
+    acl too_fast sc1_conn_cur ge 100
+    
+    # reject if not white listed and too many connections for this user
+    http-request deny if !white_list too_fast
+    # END API Throttling Logic
+
+  <% port = '8000' -%>
+  <% if useNginx -%>
+    <% port = '80' -%>
+  <% end -%>
+
+  <% servers = 0 -%>
+  <% node[:opsworks][:layers][:voice][:instances].each_value do |instance| -%>
+    <% servers += 1 -%>
+    server ec2-id-<%= instance[:aws_instance_id] %> <%= instance[:private_ip] %>:<%= port %> check port <%= port %> observe layer7
+  <% end -%>
+  <% if servers == 0 -%>
+    server localhost 127.0.0.1:8080 weight 1 maxconn 5 check
+  <% end -%>
+  
+    stats enable
+    stats uri /haproxy
+    stats auth admin:s3ndh1b2012
+
+backend siplog-upload
+    balance roundrobin
+    reqadd X-Forwarded-Proto:\ https if { ssl_fc }
+    option forwardfor
+    option abortonclose
+    option httpchk GET /health
+    <% port = '8000' -%>
+    <% if useNginx -%>
+        <% port = '80' -%>
+    <% end -%>
+
+    <% servers = 0 -%>
+    <% node[:opsworks][:layers]["siplog-upload"][:instances].each_value do |instance| -%>
+        <% servers += 1 -%>
+        server ec2-id-<%= instance[:aws_instance_id] %> <%= instance[:private_ip] %>:<%= port %> check port <%= port %> observe layer7
+    <% end -%>
+    <% if servers == 0 -%>
+        server localhost 127.0.0.1:8080 weight 1 maxconn 5 check
+    <% end -%>
+
+backend maintenance
+    acl static_file path_end .gif || path_end .jpg || path_end .jpeg || path_end .png || path_end .css
+    reqirep ^GET\ (.*)                    GET\ /sendhub_prod_user_files/turnaway_page\1     if static_file
+    reqirep ^([^\ ]*)\ [^\ ]*\ (.*)       \1\ /sendhub_prod_user_files/turnaway_page/maintenance.html\ \2    if !static_file
+    reqirep ^Host:\ .*                    Host:\ s3.amazonaws.com
+    reqadd Cache-Control:\ no-cache,\ no-store,\ must-revalidate
+    reqadd Pragma:\ no-cache
+    reqadd Expires:\ 0
+    rspirep ^HTTP/([^0-9\.]+)\ 200\ OK    HTTP/\1\ 503\ 
+    rspadd Retry-After:\ 60
+    server s3 s3.amazonaws.com:80
+
+
